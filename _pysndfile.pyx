@@ -31,7 +31,23 @@ import os
 cimport numpy as cnp
 from libcpp.string cimport string
 
-_pysndfile_version=(1,3,3)
+IF UNAME_SYSNAME == "Windows":
+    from libc.stddef cimport wchar_t
+
+    cdef extern from "Windows.h":
+        ctypedef const wchar_t *LPCWSTR
+
+    cdef extern from "Python.h":
+       wchar_t* PyUnicode_AsWideCharString(object, Py_ssize_t *)
+       void PyMem_Free(void *p)
+
+    cdef extern from *:
+        """
+        #define ENABLE_SNDFILE_WINDOWS_PROTOTYPES 1
+        """
+
+
+_pysndfile_version=(1,3,3,1)
 def get_pysndfile_version():
     """
     return tuple describing the version opf pysndfile
@@ -96,6 +112,7 @@ cdef extern from "pysndfile.hh":
     cdef cppclass SndfileHandle :
         SndfileHandle(const char *path, int mode, int format, int channels, int samplerate)
         SndfileHandle(const int fh, int close_desc, int mode, int format, int channels, int samplerate)
+        SndfileHandle(const wchar_t *path, int mode, int format, int channels, int samplerate)
         sf_count_t frames()
         int format()
         int channels()
@@ -636,6 +653,11 @@ cdef class PySndfile:
         cdef int sfmode
         cdef const char*cfilename
         cdef int fh
+
+        IF UNAME_SYSNAME == "Windows":
+           cdef Py_ssize_t length
+           cdef wchar_t *my_wchars
+
         # -1 will indicate that the file has been open from filename, not from
         # file descriptor
         self.fd = -1
@@ -665,12 +687,24 @@ cdef class PySndfile:
             self.filename = b""
             self.fd = filename
         else:
-            if len(filename)> 2 and filename[0] == "~" and filename[1] == "/":
-                filename = os.path.join(os.environ['HOME'], filename[2:])
+            filename = os.path.expanduser(filename)
+
+            IF UNAME_SYSNAME == "Windows":
+                # Need to get the wchars before filename is converted to utf-8
+                my_wchars = PyUnicode_AsWideCharString(filename, &length)
+
             if isinstance(filename, unicode):
                 filename = bytes(filename, "UTF-8")
             self.filename = filename
-            self.thisPtr = new SndfileHandle(self.filename.c_str(), sfmode, format, channels, samplerate)
+
+            IF UNAME_SYSNAME == "Windows":
+                if length > 0:
+                    self.thisPtr = new SndfileHandle(my_wchars, sfmode, format, channels, samplerate)
+                    PyMem_Free(my_wchars)
+                else:
+                    raise RuntimeError("PySndfile::error while converting {0} into wchars".format(filename))
+            ELSE:
+                self.thisPtr = new SndfileHandle(self.bfilename.c_str(), sfmode, format, channels, samplerate)
 
         if self.thisPtr == NULL or self.thisPtr.rawHandle() == NULL:
             raise IOError("PySndfile::error while opening {0}\n\t->{1}".format(self.filename,
