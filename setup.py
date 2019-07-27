@@ -1,9 +1,6 @@
 #! /usr/bin/env python
 from __future__ import print_function
 
-from ez_setup import use_setuptools
-use_setuptools()
-
 import os
 import shutil
 import subprocess
@@ -29,22 +26,22 @@ compile_for_RTD =  "READTHEDOCS" in os.environ
 
 if compile_for_RTD:
     ext_modules = [Extension("_pysndfile", ["_pysndfile.pyx"],
-                             define_macros=[('READTHEDOCS_ENV', '1')],
-                            include_dirs = [np.get_include()],
-                            language="c++")]
+                             define_macros=[('READTHEDOCS_ENV', '1'), ("NPY_NO_DEPRECATED_API", "NPY_1_13_API_VERSION")],
+                             include_dirs = [np.get_include()],
+                             language="c++")]
 else:
     ext_modules = [Extension("_pysndfile", ["_pysndfile.pyx"],
-                            libraries = ["sndfile"],
-                            include_dirs = [np.get_include()],
-                            language="c++")]
+                             libraries = ["sndfile"],
+                             include_dirs = [np.get_include()],
+                             language="c++",
+                             define_macros = [("NPY_NO_DEPRECATED_API", "NPY_1_13_API_VERSION") ] )]
 
 try :
     from Cython.Build import cythonize
     ext_modules = cythonize(ext_modules, force=compile_for_RTD )
 except ImportError  :
-    print("cythonize not available use pre_cythonized source")
-    shutil.copy2("_pysndfile_precythonized.cpp", "_pysndfile.cpp")
-    ext_modules[0].sources[0] =  "_pysndfile.cpp"
+    print("cannot import cythonize - to be able to cythonize the source please install cython")
+    sys.exit(1)
 
 # check clang compiler and disable warning
 def compiler_is_clang(comp) :
@@ -160,6 +157,11 @@ def update_long_descr():
 
     return open(LONG_DESCR_path).read()
 
+
+with open('./requirements.txt') as f:
+    install_requires = [line.strip('\n') for line in f.readlines()]
+
+
 # read should not be used because it does not update LONG_DESCR if required.
 def read_long_descr():
     LONG_DESCR_path = os.path.join(os.path.dirname(__file__), 'LONG_DESCR')
@@ -177,8 +179,9 @@ setup(
     author_email = "axel.dot.roebel@ircam.dot.fr",
     description = "pysndfile provides PySndfile, a Cython wrapper class for reading/writing soundfiles using libsndfile",
     long_description = update_long_descr(),
-    long_description_content_type='text/x-rstrst',
+    long_description_content_type='text/x-rst',
     license = "LGPL",
+    install_requires= install_requires,
     url = " https://forge-2.ircam.fr/roebel/pysndfile.git",
     keywords = "soundfile,audiofile",
     cmdclass = {

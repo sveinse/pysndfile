@@ -31,14 +31,32 @@ import os
 cimport numpy as cnp
 from libcpp.string cimport string
 
-_pysndfile_version=(1,3,3)
+cdef extern from "Python.h":
+    ctypedef int Py_intptr_t
+
+IF UNAME_SYSNAME == "Windows":
+    from libc.stddef cimport wchar_t
+
+    cdef extern from "Windows.h":
+        ctypedef const wchar_t *LPCWSTR
+
+    cdef extern from "Python.h":
+       wchar_t* PyUnicode_AsWideCharString(object, Py_ssize_t *)
+       void PyMem_Free(void *p)
+
+    cdef extern from *:
+        """
+        #define ENABLE_SNDFILE_WINDOWS_PROTOTYPES 1
+        """
+
+_pysndfile_version=(1,3,4)
 def get_pysndfile_version():
     """
     return tuple describing the version opf pysndfile
     """
     return _pysndfile_version
 
-
+    
 _max_supported_string_length_tuple = (
     ("wav", 2040),
     ("wavex", 2040),
@@ -56,9 +74,15 @@ max_supported_string_length = dict(_max_supported_string_length_tuple)
 cdef extern from "numpy/arrayobject.h":
     void PyArray_ENABLEFLAGS(cnp.ndarray arr, int flags)
 
-cdef extern from "pysndfile.hh":
 
-    cdef struct SF_FORMAT_INFO:
+cdef extern from "numpy/arrayobject.h":
+    ctypedef Py_intptr_t npy_intp
+    void *PyArray_DATA(cnp.ndarray arr)
+    int PyArray_NDIM(cnp.ndarray arr)
+    npy_intp* PyArray_DIMS(cnp.ndarray arr)
+
+cdef extern from "pysndfile.hh":
+    ctypedef struct SF_FORMAT_INFO:
         int format
         char *name
         char *extension
@@ -89,35 +113,9 @@ cdef extern from "pysndfile.hh":
         unsigned int cue_count
         SF_CUE_POINT cue_points[100]
 
-    ctypedef SF_FORMAT_INFO SF_FORMAT_INFO
     cdef int sf_command(SNDFILE *sndfile, int command, void *data, int datasize)
     cdef int sf_format_check (const SF_INFO *info)
     cdef char *sf_error_number(int errnum) 
-    cdef cppclass SndfileHandle :
-        SndfileHandle(const char *path, int mode, int format, int channels, int samplerate)
-        SndfileHandle(const int fh, int close_desc, int mode, int format, int channels, int samplerate)
-        sf_count_t frames()
-        int format()
-        int channels()
-        int samplerate()
-        int seekable()
-        int error()
-        char* strError()
-        int command (int cmd, void *data, int datasize)
-        int get_cue_count()
-        sf_count_t seek (sf_count_t frames, int whence)
-        void writeSync () 
-        sf_count_t readf (short *ptr, sf_count_t items) 
-        sf_count_t readf (int *ptr, sf_count_t items) 
-        sf_count_t readf (float *ptr, sf_count_t items) 
-        sf_count_t readf (double *ptr, sf_count_t items)
-        sf_count_t writef (const short *ptr, sf_count_t items) 
-        sf_count_t writef (const int *ptr, sf_count_t items) 
-        sf_count_t writef (const float *ptr, sf_count_t items) 
-        sf_count_t writef (const double *ptr, sf_count_t items)
-        SNDFILE* rawHandle()
-        int setString (int str_type, const char* str)
-        const char* getString (int str_type)
 
     cdef int C_SF_FORMAT_WAV "SF_FORMAT_WAV"     # /* Microsoft WAV format (little endian default). */
     cdef int C_SF_FORMAT_AIFF "SF_FORMAT_AIFF"   # /* Apple/SGI AIFF format (big endian). */
@@ -272,6 +270,10 @@ cdef extern from "pysndfile.hh":
     
     cdef int C_SF_COUNT_MAX "SF_COUNT_MAX"  
 
+IF UNAME_SYSNAME == "Linux":
+    include "sndfile_linux.pxi"
+IF UNAME_SYSNAME == "Windows":
+    include "sndfile_win32.pxi"
 
 # these two come with more recent versions of libsndfile
 # to not break compilation they are defined outside sndfile.h
@@ -636,6 +638,11 @@ cdef class PySndfile:
         cdef int sfmode
         cdef const char*cfilename
         cdef int fh
+
+        IF UNAME_SYSNAME == "Windows":
+           cdef Py_ssize_t length
+           cdef wchar_t *my_wchars
+           
         # -1 will indicate that the file has been open from filename, not from
         # file descriptor
         self.fd = -1
@@ -665,11 +672,25 @@ cdef class PySndfile:
             self.filename = b""
             self.fd = filename
         else:
-            if len(filename)> 2 and filename[0] == "~" and filename[1] == "/":
-                filename = os.path.join(os.environ['HOME'], filename[2:])
+            filename = os.path.expanduser(filename)
+
+            IF UNAME_SYSNAME == "Windows":
+                # Need to get the wchars before filename is converted to utf-8
+                my_wchars = PyUnicode_AsWideCharString(filename, &length)
+            
             if isinstance(filename, unicode):
                 filename = bytes(filename, "UTF-8")
             self.filename = filename
+
+            IF UNAME_SYSNAME == "Windows":
+                if length > 0:
+                    self.thisPtr = new SndfileHandle(my_wchars, sfmode, format, channels, samplerate)
+                    PyMem_Free(my_wchars)
+                else:
+                    raise RuntimeError("PySndfile::error while converting {0} into wchars".format(filename))
+            ELSE:
+                self.thisPtr = new SndfileHandle(self.bfilename.c_str(), sfmode, format, channels, samplerate)
+            
             self.thisPtr = new SndfileHandle(self.filename.c_str(), sfmode, format, channels, samplerate)
 
         if self.thisPtr == NULL or self.thisPtr.rawHandle() == NULL:
@@ -812,7 +833,7 @@ cdef class PySndfile:
         cdef cnp.ndarray[cnp.float64_t, ndim=2] ty = np.empty((nframes, self.thisPtr.channels()),
                                                                 dtype=np.float64, order='C')
 
-        res = self.thisPtr.readf(<double*>ty.data, nframes)
+        res = self.thisPtr.readf(<double*> PyArray_DATA(ty), nframes)
         if not res == nframes:
             raise RuntimeError("Asked %d frames, read %d" % (nframes, res))
         return ty
@@ -823,7 +844,7 @@ cdef class PySndfile:
         cdef cnp.ndarray[cnp.float32_t, ndim=2] ty = np.empty((nframes, self.thisPtr.channels()),
                                                                 dtype=np.float32, order='C')
 
-        res = self.thisPtr.readf(<float*>ty.data, nframes)
+        res = self.thisPtr.readf(<float*>PyArray_DATA(ty), nframes)
         if not res == nframes:
             raise RuntimeError("Asked %d frames, read %d" % (nframes, res))
         return ty
@@ -834,7 +855,7 @@ cdef class PySndfile:
         cdef cnp.ndarray[cnp.int32_t, ndim=2] ty = np.empty((nframes, self.thisPtr.channels()),
                                                             dtype=np.int32, order='C')
 
-        res = self.thisPtr.readf(<int*>ty.data, nframes)
+        res = self.thisPtr.readf(<int*>PyArray_DATA(ty), nframes)
         if not res == nframes:
             raise RuntimeError("Asked %d frames, read %d" % (nframes, res))
         return ty
@@ -845,7 +866,7 @@ cdef class PySndfile:
         cdef cnp.ndarray[cnp.int16_t, ndim=2] ty = np.empty((nframes, self.thisPtr.channels()),
                                                             dtype=np.short, order='C')
 
-        res = self.thisPtr.readf(<short*>ty.data, nframes)
+        res = self.thisPtr.readf(<short*>PyArray_DATA(ty), nframes)
         if not res == nframes:
             raise RuntimeError("Asked %d frames, read %d" % (nframes, res))
         return ty
@@ -874,15 +895,15 @@ cdef class PySndfile:
             raise RuntimeError("PySndfile::error::no valid soundfilehandle")
         
         # First, get the number of channels and frames from input
-        if input.ndim == 2:
-            nc = input.shape[1]
+        if PyArray_NDIM(input) == 2:
+            nc = PyArray_DIMS(input)[1]
             nframes = input.size / nc
-        elif input.ndim == 1:
+        elif PyArray_NDIM(input) == 1:
             nc = 1
             input = input[:, None]
             nframes = input.size
         else:
-            raise ValueError("PySndfile::write_frames::error cannot handle arrays of {0:d} dimensions, please restrict to  2 dimensions".format(input.ndim))
+            raise ValueError("PySndfile::write_frames::error cannot handle arrays of {0:d} dimensions, please restrict to  2 dimensions".format(PyArray_NDIM(input)))
 
         # Number of channels should be the one expected
         if not nc == self.thisPtr.channels():
@@ -895,16 +916,16 @@ cdef class PySndfile:
             if (self.thisPtr.format() & C_SF_FORMAT_SUBMASK) not in [C_SF_FORMAT_FLOAT, C_SF_FORMAT_DOUBLE]:
                 if (np.max(np.abs(input.flat)) > 1.) :
                     warnings.warn("write_frames::warning::audio data has been clipped while writing to file {0}.".format(self.filename.decode("UTF-8")))
-            res = self.thisPtr.writef(<double*>input.data, nframes)
+            res = self.thisPtr.writef(<double*>PyArray_DATA(input), nframes)
         elif input.dtype == np.float32:
             if (self.thisPtr.format() & C_SF_FORMAT_SUBMASK) not in [C_SF_FORMAT_FLOAT, C_SF_FORMAT_DOUBLE]:
                 if (np.max(np.abs(input.flat)) > 1.) :
                     warnings.warn("write_frames::warning::audio data has been clipped while writing to file {0}.".format(self.filename.decode("UTF-8")))
-            res = self.thisPtr.writef(<float*>input.data, nframes)
+            res = self.thisPtr.writef(<float*>PyArray_DATA(input), nframes)
         elif input.dtype == np.int32:
-            res = self.thisPtr.writef(<int*>input.data, nframes)
+            res = self.thisPtr.writef(<int*>PyArray_DATA(input), nframes)
         elif input.dtype == np.short:
-            res = self.thisPtr.writef(<short*>input.data, nframes)
+            res = self.thisPtr.writef(<short*>PyArray_DATA(input), nframes)
         else:
             raise RuntimeError("type of input {0} not understood".format(str(input.dtype)))
 
